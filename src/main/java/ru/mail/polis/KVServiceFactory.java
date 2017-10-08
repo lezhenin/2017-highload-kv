@@ -1,6 +1,7 @@
 package ru.mail.polis;
 
 import org.jetbrains.annotations.NotNull;
+import ru.mail.polis.lezhenin.Service;
 
 import java.io.File;
 import java.io.IOException;
@@ -44,7 +45,9 @@ final class KVServiceFactory {
             throw new IllegalArgumentException("Path is not a directory: " + data);
         }
 
-        // TODO: Implement me
-        throw new UnsupportedOperationException("Implement me!");
+//         TODO: Implement me
+//        throw new UnsupportedOperationException("Implement me!");
+
+        return new Service(port, data);
     }
 }
