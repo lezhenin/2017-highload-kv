@@ -1,12 +1,14 @@
 package ru.mail.polis.lezhenin;
 
+import org.jetbrains.annotations.NotNull;
+
 import java.io.IOException;
 import java.util.NoSuchElementException;
 
 public interface DataAccessProvider {
 
-    void putData(String id, byte [] data) throws IOException;
-    byte [] getData(String id) throws IOException, NoSuchElementException;
-    void deleteData(String id);
+    void putData(@NotNull String id, byte [] data) throws IOException, IllegalArgumentException;
+    byte [] getData(@NotNull String id) throws IOException, IllegalArgumentException, NoSuchElementException;
+    void deleteData(@NotNull String id) throws IOException, IllegalArgumentException;
 
 }
