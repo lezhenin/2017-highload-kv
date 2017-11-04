@@ -51,6 +51,6 @@ final class KVServiceFactory {
 //         TODO: Implement me
 //        throw new UnsupportedOperationException("Implement me!");
 
-        return new Service(port, data);
+        return new Service(port, data, topology);
     }
 }
