@@ -9,9 +9,14 @@ import ru.mail.polis.KVService;
 import java.io.*;
 import java.net.*;
 import java.util.*;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 public class Service implements KVService {
+
+    private final Executor statusExecutor = Executors.newCachedThreadPool();
+    private final Executor entityExecutor = Executors.newCachedThreadPool();
+    private final Executor innerExecutor = Executors.newSingleThreadExecutor();
 
     private final static String HTTP_METHOD_PUT = "PUT";
     private final static String HTTP_METHOD_GET = "GET";
@@ -73,21 +78,38 @@ public class Service implements KVService {
     private void createContext() {
 
         httpServer.createContext("/v0/status",
-                httpExchange -> {
-                    System.out.println("STATUS ASKED");
-                    sendResponse(httpExchange, 200, null);
-                });
+                httpExchange -> statusExecutor.execute(() -> {
+                    try {
+                        sendResponse(httpExchange, 200, null);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                        httpExchange.close();
+                    }
+                }));
 
 
         httpServer.createContext("/v0/entity",
-                this::handleEntityRequest
+                (HttpExchange httpExchange) -> entityExecutor.execute(() -> {
+                    try {
+                        handleEntityRequest(httpExchange);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                        httpExchange.close();
+                    }
+                })
         );
 
         httpServer.createContext("/v0/inner",
-                this::handleInnerRequest
+                (HttpExchange httpExchange) -> innerExecutor.execute(() -> {
+                    try {
+                        handleInnerRequest(httpExchange);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                        httpExchange.close();
+                    }
+                })
         );
 
-        httpServer.setExecutor(Executors.newFixedThreadPool(3));
     }
 
     private void handleInnerRequest(@NotNull HttpExchange httpExchange) throws IOException {
