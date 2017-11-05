@@ -1,7 +1,6 @@
 package ru.mail.polis.lezhenin;
 
 import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -10,7 +9,6 @@ import ru.mail.polis.KVService;
 import java.io.*;
 import java.net.*;
 import java.util.*;
-import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 public class Service implements KVService {
@@ -18,6 +16,15 @@ public class Service implements KVService {
     private final static String HTTP_METHOD_PUT = "PUT";
     private final static String HTTP_METHOD_GET = "GET";
     private final static String HTTP_METHOD_DELETE = "DELETE";
+
+    private final static int HTTP_CODE_OK = 200;
+    private final static int HTTP_CODE_CREATED = 201;
+    private final static int HTTP_CODE_ACCEPTED = 202;
+    private final static int HTTP_CODE_BAD_REQUEST = 400;
+    private final static int HTTP_CODE_NOT_FOUND = 404;
+    private final static int HTTP_CODE_METHOD_NOT_ALLOWED = 405;
+    private final static int HTTP_CODE_GONE = 410;
+    private final static int HTTP_CODE_GATEWAY_TIMEOUT = 504;
 
     private List<String> topology;
     private int quorum = 0;
@@ -60,7 +67,7 @@ public class Service implements KVService {
 
     @Override
     public void stop() {
-        httpServer.stop(1);
+        httpServer.stop(0);
     }
 
     private void createContext() {
@@ -92,24 +99,25 @@ public class Service implements KVService {
         id = getParameter(httpExchange, "id");
 
         if (id == null) {
-            sendResponse(httpExchange, 404, null);
+            sendResponse(httpExchange, HTTP_CODE_NOT_FOUND, null);
             return;
         }
 
         if (id.isEmpty()) {
-            sendResponse(httpExchange, 400, null);
+            sendResponse(httpExchange, HTTP_CODE_BAD_REQUEST, null);
             return;
         }
 
         String tempStr = getParameter(httpExchange, "sendData");
         sendData = tempStr != null && tempStr.matches("(?i)true");
         System.out.println("SEND DATA " + sendData + " FROM STRING " + tempStr);
-//        sendData = true; // temp
+
+        byte[] byteData = null;
+        int resultCode;
+        String method = httpExchange.getRequestMethod();
 
         try {
 
-            byte[] byteData;
-            String method = httpExchange.getRequestMethod();
             switch (method) {
 
                 case HTTP_METHOD_PUT:
@@ -117,34 +125,45 @@ public class Service implements KVService {
                     byteData = readData(requestStream);
                     storage.putData(id, byteData);
                     System.out.println("P LENGTH " + byteData.length);
-                    sendResponse(httpExchange, 201, null);
+                    resultCode = HTTP_CODE_CREATED;
+                    byteData = null;
                     break;
 
                 case HTTP_METHOD_GET:
-                    byteData = storage.getData(id);
-                    if (sendData) {
-                        sendResponse(httpExchange, 200, byteData);
-                        System.out.println("G LENGTH " + byteData.length);
+                    if (storage.isDeleted(id)) {
+                        resultCode = HTTP_CODE_GONE;
+                    } else if (storage.isExist(id)) {
+                        if (sendData) {
+                            byteData = storage.getData(id);
+                            System.out.println("G LENGTH " + byteData.length);
+                        }
+                        resultCode = HTTP_CODE_OK;
                     } else {
-                        sendResponse(httpExchange, 200, null);
+                        resultCode = HTTP_CODE_NOT_FOUND;
                     }
                     break;
 
                 case HTTP_METHOD_DELETE:
                     storage.deleteData(id);
-                    sendResponse(httpExchange, 202, null);
+                    resultCode = HTTP_CODE_ACCEPTED;
+                    break;
+
+                default:
+                    resultCode = HTTP_CODE_METHOD_NOT_ALLOWED;
                     break;
             }
 
+            sendResponse(httpExchange, resultCode, byteData);
+
         } catch (Exception e) {
             System.out.println("INNER CATCH");
-            sendResponse(httpExchange, 404, null);
+            sendResponse(httpExchange, HTTP_CODE_NOT_FOUND, null);
         }
     }
 
     private void handleEntityRequest(@NotNull HttpExchange httpExchange) throws IOException {
 
-        System.out.println("ENTITY");
+        System.out.println("\nENTITY");
         String id;
 
         id = getParameter(httpExchange, "id");
@@ -176,7 +195,6 @@ public class Service implements KVService {
             sendResponse(httpExchange, 400, null);
             return;
         }
-        //todo checks
 
         int answers = 0;
         int hash = id.hashCode();
@@ -186,87 +204,99 @@ public class Service implements KVService {
 
         System.out.println("ID " + id);
 
-        int actualCode = 504;
-        List<String> available = new ArrayList<>();
+        List<Integer> responseCodes = new ArrayList<>(from);
 
-        for (int i = 0; i < topology.size() && available.size() < from; i++) {
-            System.out.println("HASH" + hash + "  INDX " + (Math.abs(hash) + i) % topology.size());
-            url = topology.get((Math.abs(hash) + i) % topology.size());
-            System.out.println("ASK STATUS " + url);
-            int code = sendRequest(url + "/v0/status", "", HTTP_METHOD_GET);
-            if (code == 200) {
-                available.add(url);
-            }
-        }
+        int actualCode;
+        byte [] data = null;
+        List<Byte> dataList = null;
 
-        if (available.size() < ask) {
-            sendResponse(httpExchange, 504, null);
-            return;
-        }
+        String method = httpExchange.getRequestMethod();
 
-        byte [] data = new byte[0];
+        for (int i = 0; i < from && answers < ask; i++) {
 
-        for (int i = 0; i < available.size() && answers < ask; i++) {
-            url = available.get(i) + "/v0/inner";
+            url = topology.get((Math.abs(hash) + i) % from) + "/v0/inner";
+            System.out.println("INDEX " + (Math.abs(hash) + i) % from);
             System.out.println("URL " + url);
-            System.out.println(httpExchange.getLocalAddress().getHostName());
-            String method = httpExchange.getRequestMethod();
             System.out.println("METHOD " + method);
-
-            if (method.equals(HTTP_METHOD_PUT) && i == 0) {
-                data = readData(httpExchange.getRequestBody());
-            }
 
             switch (method) {
 
                 case HTTP_METHOD_PUT:
-                    List<Byte> dataList = byteArrayToList(data);
-                    try {
-                        actualCode = sendRequest(url, parameters, method, dataList, null);
-                    } catch (IOException e) {
-                        System.out.println(e.getMessage());
-                        e.printStackTrace();
+                    if (data == null) {
+                        data = readData(httpExchange.getRequestBody());
                     }
-                    if (actualCode == 201) {
-                        answers++;
-                    }
+                    dataList = byteArrayToList(data);
+                    actualCode = sendRequest(url, parameters, method, dataList, null);
+                    responseCodes.add(actualCode);
                     break;
 
                 case HTTP_METHOD_GET:
-                    if (answers != ask-1) {
-                        actualCode = sendRequest(url, parameters, method);
-                    } else {
-                        List<Byte> dataList2 = new ArrayList<>();
-                        actualCode = sendRequest(url, parameters + "&sendData=true", method, null, dataList2);
-                        if (actualCode == 200) {
-                            byte [] data2 = byteListToArray(dataList2);
-                            sendResponse(httpExchange, 200, data2);
-                            return;
+                    dataList = new ArrayList<>();
+                    if (data == null) {
+                        actualCode = sendRequest(url, parameters + "&sendData=true", method, null, dataList);
+                        if (actualCode == HTTP_CODE_OK) {
+                            System.out.println("DATA SAVED");
+                            data = byteListToArray(dataList);
                         }
+                    } else {
+                        actualCode = sendRequest(url, parameters, method);
                     }
-                    if (actualCode == 404) {
-                        System.out.println("INNER GET ERROR");
-                        sendResponse(httpExchange, 404, null);
-                        return;
-                    }
-                    if (actualCode == 200) {
-                        answers++;
-                    }
+                    responseCodes.add(actualCode);
                     break;
 
                 case HTTP_METHOD_DELETE:
                     actualCode = sendRequest(url, parameters, method);
-                    if (actualCode == 202) {
-                        answers++;
-                    }
+                    responseCodes.add(actualCode);
                     break;
+
+                default:
+                    actualCode = HTTP_CODE_METHOD_NOT_ALLOWED;
+                    break;
+            }
+
+            if (actualCode != HTTP_CODE_GATEWAY_TIMEOUT) {
+                answers++;
             }
         }
 
-        System.out.println("ACTUAL CODE " + actualCode);
-        sendResponse(httpExchange, actualCode, null);
-        System.out.println("ACTUAL CODE " + actualCode);
+        if (!method.equals(HTTP_METHOD_GET)) {
+            data = null;
+        }
 
+        int resultCode = interpretResponses(method, responseCodes, ask, from);
+
+        System.out.println("RESULT CODE " + resultCode);
+        sendResponse(httpExchange, resultCode, data);
+    }
+
+    private int interpretResponses(String method, List<Integer> responses, int ask, int from) {
+        if (Collections.frequency(responses, HTTP_CODE_GATEWAY_TIMEOUT) > from - ask) {
+            return HTTP_CODE_GATEWAY_TIMEOUT;
+        }
+        switch (method) {
+            case HTTP_METHOD_PUT:
+                if (Collections.frequency(responses, HTTP_CODE_CREATED) >= ask) {
+                    return HTTP_CODE_CREATED;
+                } else {
+                    return HTTP_CODE_NOT_FOUND;
+                }
+            case HTTP_METHOD_GET:
+                if (responses.contains(HTTP_CODE_GONE)) {
+                    return HTTP_CODE_NOT_FOUND;
+                } else if (responses.contains(HTTP_CODE_OK)) {
+                    return HTTP_CODE_OK;
+                } else {
+                    return HTTP_CODE_NOT_FOUND;
+                }
+            case HTTP_METHOD_DELETE:
+                if (Collections.frequency(responses, HTTP_CODE_ACCEPTED) >= ask) {
+                    return HTTP_CODE_ACCEPTED;
+                } else {
+                    return HTTP_CODE_NOT_FOUND;
+                }
+            default:
+                return HTTP_CODE_METHOD_NOT_ALLOWED;
+        }
     }
 
     private void sendResponse(HttpExchange exchange, int code, @Nullable byte[] data) throws IOException {
@@ -327,6 +357,8 @@ public class Service implements KVService {
                             @Nullable List<Byte> outputData,
                             @Nullable List<Byte> inputData) throws IOException {
 
+        int code = 504;
+
         HttpURLConnection connection;
         URL url = new URL(urlString + params);
 
@@ -339,27 +371,29 @@ public class Service implements KVService {
         connection.setDoInput(true);//todo
         connection.setDoOutput(true);
 
-        if (outputData != null) {
-            System.out.println("WRITE OUT");
-            connection.setRequestProperty("Content-Length", String.valueOf(outputData.size()));
-            OutputStream outputStream = connection.getOutputStream();
-            outputStream.write(byteListToArray(outputData));
-            outputStream.close();
-        }
+        try {
 
-        if (inputData != null) {
-            System.out.println("WRITE IN");
-            inputData.clear();
-            try {
+            if (outputData != null) {
+                System.out.println("WRITE OUT");
+                connection.setRequestProperty("Content-Length", String.valueOf(outputData.size()));
+                OutputStream outputStream = connection.getOutputStream();
+                outputStream.write(byteListToArray(outputData));
+                outputStream.close();
+            }
+
+            if (inputData != null) {
+                System.out.println("WRITE IN");
+                inputData.clear();
                 InputStream inputStream = connection.getInputStream();
                 inputData.addAll(byteArrayToList(readData(inputStream)));
-            } catch (IOException ignored) { }
-        }
+            }
 
-        int code = 504;
+        } catch (IOException ignored) { }
+
         try {
             code = connection.getResponseCode();
         } catch (IOException ignored) { }
+
         System.out.println("CODE RECEIVED");
         connection.disconnect();
         System.out.println("CODE " + code);
