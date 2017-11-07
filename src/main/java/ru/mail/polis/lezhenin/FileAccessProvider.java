@@ -22,7 +22,7 @@ public class FileAccessProvider implements DataAccessProvider {
         this.storageDir = storageDir;
     }
 
-    private Path constructPath(String id) throws IllegalArgumentException {
+    private Path constructPath(@NotNull String id) throws IllegalArgumentException {
         if (id.isEmpty() || !id.matches(VALID_FILENAME_REGEX)) {
             throw new IllegalArgumentException();
         }
