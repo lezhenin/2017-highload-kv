@@ -12,6 +12,8 @@ import java.util.*;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
+import static ru.mail.polis.lezhenin.ServiceUtils.*;
+
 public class Service implements KVService {
 
     private final Executor statusExecutor = Executors.newCachedThreadPool();
@@ -72,10 +74,11 @@ public class Service implements KVService {
                         sendResponse(httpExchange, HTTP_CODE_OK, null);
                     } catch (IOException e) {
                         e.printStackTrace();
+                    } finally {
                         httpExchange.close();
                     }
-                }));
-
+                })
+        );
 
         httpServer.createContext("/v0/entity",
                 (HttpExchange httpExchange) -> entityExecutor.execute(() -> {
@@ -83,17 +86,19 @@ public class Service implements KVService {
                         handleEntityRequest(httpExchange);
                     } catch (IOException e) {
                         e.printStackTrace();
+                    } finally {
                         httpExchange.close();
                     }
                 })
         );
 
-        httpServer.createContext("/v0/inner",
+        httpServer.createContext("/v0/inner_interact",
                 (HttpExchange httpExchange) -> innerExecutor.execute(() -> {
                     try {
                         handleInnerRequest(httpExchange);
                     } catch (IOException e) {
                         e.printStackTrace();
+                    } finally {
                         httpExchange.close();
                     }
                 })
@@ -103,17 +108,15 @@ public class Service implements KVService {
 
     private void handleInnerRequest(@NotNull HttpExchange httpExchange) throws IOException {
 
-        String id;
-        id = getParameter(httpExchange, ID_KEY);
-        int IdCode = checkId(id);
-        if (IdCode != HTTP_CODE_OK) {
-            sendResponse(httpExchange, IdCode, null);
+        String id = getParameter(httpExchange, ID_KEY);
+        int idCode = checkId(id);
+        if (idCode != HTTP_CODE_OK) {
+            sendResponse(httpExchange, idCode, null);
             return;
         }
 
-        boolean sendData;
-        String tempStr = getParameter(httpExchange, SEND_DATA_KEY);
-        sendData = tempStr != null && tempStr.matches("(?i)true");
+        String sendDataKeyStr = getParameter(httpExchange, SEND_DATA_KEY);
+        boolean sendData = sendDataKeyStr != null && sendDataKeyStr.matches("(?i)true");
 
         byte[] byteData = null;
         int resultCode;
@@ -163,11 +166,10 @@ public class Service implements KVService {
 
     private void handleEntityRequest(@NotNull HttpExchange httpExchange) throws IOException {
 
-        String id;
-        id = getParameter(httpExchange, ID_KEY);
-        int IdCode = checkId(id);
-        if (IdCode != HTTP_CODE_OK) {
-            sendResponse(httpExchange, IdCode, null);
+        String id = getParameter(httpExchange, ID_KEY);
+        int idCode = checkId(id);
+        if (idCode != HTTP_CODE_OK) {
+            sendResponse(httpExchange, idCode, null);
             return;
         }
 
@@ -195,8 +197,8 @@ public class Service implements KVService {
         List<Integer> responseCodes = new ArrayList<>(from);
 
         int actualCode;
-        byte [] data = null;
-        List<Byte> dataList = null;
+        byte[] putData = null;
+        byte[] getData = null;
 
         String method = httpExchange.getRequestMethod();
 
@@ -204,34 +206,33 @@ public class Service implements KVService {
 
             for (int i = 0; i < from && answers < ask; i++) {
 
-                url = topology.get((Math.abs(hash) + i) % from) + "/v0/inner";
+                url = topology.get((Math.abs(hash) + i) % from) + "/v0/inner_interact";
 
                 switch (method) {
 
                     case HTTP_METHOD_PUT:
-                        if (data == null) {
-                            data = readData(httpExchange.getRequestBody());
+                        if (putData == null) {
+                            putData = readData(httpExchange.getRequestBody());
                         }
-                        dataList = byteArrayToList(data);
-                        actualCode = sendRequest(url, parameters, method, dataList, null);
+                        actualCode = sendRequest(url, parameters, method, putData).code;
                         responseCodes.add(actualCode);
                         break;
 
                     case HTTP_METHOD_GET:
-                        dataList = new ArrayList<>();
-                        if (data == null) {
-                            actualCode = sendRequest(url, parameters + "&" + SEND_DATA_KEY + "=true", method, null, dataList);
+                        if (getData == null) {
+                            ResponsePair pair = sendRequest(url, parameters + "&" + SEND_DATA_KEY + "=true", method);
+                            actualCode = pair.code;
                             if (actualCode == HTTP_CODE_OK) {
-                                data = byteListToArray(dataList);
+                                getData = pair.data;
                             }
                         } else {
-                            actualCode = sendRequest(url, parameters, method);
+                            actualCode = sendRequest(url, parameters, method).code;
                         }
                         responseCodes.add(actualCode);
                         break;
 
                     case HTTP_METHOD_DELETE:
-                        actualCode = sendRequest(url, parameters, method);
+                        actualCode = sendRequest(url, parameters, method).code;
                         responseCodes.add(actualCode);
                         break;
 
@@ -245,23 +246,21 @@ public class Service implements KVService {
                 }
             }
 
-            if (!method.equals(HTTP_METHOD_GET)) {
-                data = null;
-            }
-
         } catch (IOException e) {
             sendResponse(httpExchange, HTTP_CODE_INTERNAL_ERROR, null);
             return;
         }
 
         int resultCode = interpretResponses(method, responseCodes, ask, from);
-        sendResponse(httpExchange, resultCode, data);
+        sendResponse(httpExchange, resultCode, getData);
     }
 
-    private int interpretResponses(String method, List<Integer> responses, int ask, int from) {
+    private int interpretResponses(@NotNull String method, @NotNull List<Integer> responses, int ask, int from) {
+
         if (Collections.frequency(responses, HTTP_CODE_GATEWAY_TIMEOUT) > from - ask) {
             return HTTP_CODE_GATEWAY_TIMEOUT;
         }
+
         switch (method) {
             case HTTP_METHOD_PUT:
                 if (Collections.frequency(responses, HTTP_CODE_CREATED) >= ask) {
@@ -298,110 +297,4 @@ public class Service implements KVService {
         }
     }
 
-    private void sendResponse(HttpExchange exchange, int code, @Nullable byte[] data) throws IOException {
-        if (data != null) {
-            exchange.sendResponseHeaders(code, data.length);
-            OutputStream responseStream = exchange.getResponseBody();
-            responseStream.write(data);
-            responseStream.flush();
-        }
-        else {
-            exchange.sendResponseHeaders(code, 0);
-        }
-        exchange.close();
-    }
-
-    private int sendRequest(@NotNull String urlString, @NotNull String params,
-                           @NotNull String method) throws IOException {
-        return sendRequest(urlString, params, method, null, null);
-    }
-
-    private int sendRequest(@NotNull String urlString, @NotNull String params, @NotNull String method,
-                            @Nullable List<Byte> outputData,
-                            @Nullable List<Byte> inputData) throws IOException {
-
-        int code = HTTP_CODE_GATEWAY_TIMEOUT;
-
-        HttpURLConnection connection;
-        URL url = new URL(urlString + params);
-
-        connection = (HttpURLConnection) url.openConnection();
-        connection.setRequestMethod(method);
-        connection.setUseCaches(false);
-        connection.setDoInput(true);
-        connection.setDoOutput(true);
-
-        try {
-
-            if (outputData != null) {
-                OutputStream outputStream = connection.getOutputStream();
-                outputStream.write(byteListToArray(outputData));
-                outputStream.close();
-            }
-
-            if (inputData != null) {
-                inputData.clear();
-                InputStream inputStream = connection.getInputStream();
-                inputData.addAll(byteArrayToList(readData(inputStream)));
-            }
-
-        } catch (IOException ignored) { }
-
-        try {
-            code = connection.getResponseCode();
-        } catch (IOException ignored) { }
-
-        connection.disconnect();
-        return code;
-    }
-
-    private byte[] readData(@NotNull InputStream inputStream) throws IOException {
-        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[1024];
-            for (int len; (len = inputStream.read(buffer)) != -1; ) {
-                outputStream.write(buffer, 0, len);
-            }
-            outputStream.flush();
-            return outputStream.toByteArray();
-        }
-    }
-
-    private static byte [] byteListToArray(List<Byte> list) {
-        byte [] array = new byte[list.size()];
-        for (int i = 0; i < list.size(); i++) {
-            array[i] = list.get(i);
-        }
-        return array;
-    }
-
-    private static List<Byte> byteArrayToList(byte[] array) {
-        List<Byte> list = new ArrayList<>(array.length);
-        for (int i = 0; i < array.length; i++) {
-            list.add(i, array[i]);
-        }
-        return list;
-    }
-
-    @Nullable
-    private String getParameter(@NotNull HttpExchange httpExchange, @NotNull String key)
-            throws UnsupportedEncodingException {
-        String query = httpExchange.getRequestURI().getQuery();
-        query = URLDecoder.decode(query, "UTF-8");
-        Map<String, String> params = parseQuery(query);
-        return params.get(key);
-    }
-
-    @NotNull
-    private Map<String, String> parseQuery(@NotNull String query) {
-        Map<String, String> result = new HashMap<>();
-        for (String param : query.split("&")) {
-            String pair[] = param.split("=");
-            if (pair.length > 1) {
-                result.put(pair[0], pair[1]);
-            } else {
-                result.put(pair[0], "");
-            }
-        }
-        return result;
-    }
 }
