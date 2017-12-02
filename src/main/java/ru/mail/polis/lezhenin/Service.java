@@ -108,14 +108,16 @@ public class Service implements KVService {
 
     private void handleInnerRequest(@NotNull HttpExchange httpExchange) throws IOException {
 
-        String id = getParameter(httpExchange, ID_KEY);
+        Map<String, String> query = parseQuery(httpExchange);
+
+        String id = query.get(ID_KEY);
         int idCode = checkId(id);
         if (idCode != HTTP_CODE_OK) {
-            sendResponse(httpExchange, idCode, null);
+            sendResponse(httpExchange, idCode, ("BAD ID").getBytes());
             return;
         }
 
-        String sendDataKeyStr = getParameter(httpExchange, SEND_DATA_KEY);
+        String sendDataKeyStr = query.get(SEND_DATA_KEY);
         boolean sendData = sendDataKeyStr != null && sendDataKeyStr.matches("(?i)true");
 
         byte[] byteData = null;
@@ -166,16 +168,18 @@ public class Service implements KVService {
 
     private void handleEntityRequest(@NotNull HttpExchange httpExchange) throws IOException {
 
-        String id = getParameter(httpExchange, ID_KEY);
+        Map<String, String> query = parseQuery(httpExchange);
+
+        String id = query.get(ID_KEY);
         int idCode = checkId(id);
         if (idCode != HTTP_CODE_OK) {
             sendResponse(httpExchange, idCode, null);
             return;
         }
 
+        String replicas = query.get(REPLICAS_KEY);
         int ask = quorum;
         int from = topology.size();
-        String replicas = getParameter(httpExchange, REPLICAS_KEY);
 
         if ((replicas != null) && replicas.matches("\\d+/\\d+")) {
             String[] parts = replicas.split("/");
@@ -214,25 +218,26 @@ public class Service implements KVService {
                         if (putData == null) {
                             putData = readData(httpExchange.getRequestBody());
                         }
-                        actualCode = sendRequest(url, parameters, method, putData).code;
+                        actualCode = sendRequest(url, parameters, method, putData, false).code;
                         responseCodes.add(actualCode);
                         break;
 
                     case HTTP_METHOD_GET:
                         if (getData == null) {
-                            ResponsePair pair = sendRequest(url, parameters + "&" + SEND_DATA_KEY + "=true", method);
+                            ResponsePair pair = sendRequest(url, parameters + "&" + SEND_DATA_KEY + "=true",
+                                                            method, true);
                             actualCode = pair.code;
                             if (actualCode == HTTP_CODE_OK) {
                                 getData = pair.data;
                             }
                         } else {
-                            actualCode = sendRequest(url, parameters, method).code;
+                            actualCode = sendRequest(url, parameters, method, false).code;
                         }
                         responseCodes.add(actualCode);
                         break;
 
                     case HTTP_METHOD_DELETE:
-                        actualCode = sendRequest(url, parameters, method).code;
+                        actualCode = sendRequest(url, parameters, method, false).code;
                         responseCodes.add(actualCode);
                         break;
 

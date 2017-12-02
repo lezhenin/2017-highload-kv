@@ -38,15 +38,14 @@ public final class ServiceUtils {
 
     @NotNull
     public static ResponsePair sendRequest(@NotNull String urlString, @NotNull String params,
-                            @NotNull String method) throws IOException {
-        return sendRequest(urlString, params, method, null);
+                            @NotNull String method, boolean doInput) throws IOException {
+        return sendRequest(urlString, params, method, null, doInput);
     }
 
     @NotNull
     public static ResponsePair sendRequest(@NotNull String urlString, @NotNull String params, @NotNull String method,
-                            @Nullable byte [] requestDate) throws IOException {
+                            @Nullable byte [] requestData, boolean doInput) throws IOException {
 
-//        int code = HTTP_CODE_GATEWAY_TIMEOUT;
         int code = 504;
         byte [] responseData = null;
 
@@ -57,18 +56,20 @@ public final class ServiceUtils {
         connection.setRequestMethod(method);
         connection.setUseCaches(false);
         connection.setDoInput(true);
-        connection.setDoOutput(true);
 
         try {
 
-            if (requestDate != null) {
+            if (requestData != null) {
+                connection.setDoOutput(true);
                 OutputStream outputStream = connection.getOutputStream();
-                outputStream.write(requestDate);
+                outputStream.write(requestData);
                 outputStream.close();
             }
 
-            InputStream inputStream = connection.getInputStream();
-            responseData = readData(inputStream);
+            if (doInput) {
+                InputStream inputStream = connection.getInputStream();
+                responseData = readData(inputStream);
+            }
 
         } catch (IOException ignored) { }
 
@@ -92,17 +93,11 @@ public final class ServiceUtils {
         }
     }
 
-    @Nullable
-    public static String getParameter(@NotNull HttpExchange httpExchange, @NotNull String key)
+    @NotNull
+    public static Map<String, String> parseQuery(@NotNull HttpExchange httpExchange)
             throws UnsupportedEncodingException {
         String query = httpExchange.getRequestURI().getQuery();
         query = URLDecoder.decode(query, "UTF-8");
-        Map<String, String> params = parseQuery(query);
-        return params.get(key);
-    }
-
-    @NotNull
-    public static Map<String, String> parseQuery(@NotNull String query) {
         Map<String, String> result = new HashMap<>();
         for (String param : query.split("&")) {
             String pair[] = param.split("=");
