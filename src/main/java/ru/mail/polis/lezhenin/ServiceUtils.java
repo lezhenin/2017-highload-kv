@@ -10,18 +10,70 @@ import java.net.URL;
 import java.net.URLDecoder;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Callable;
+
+import static ru.mail.polis.lezhenin.Service.ID_KEY;
+import static ru.mail.polis.lezhenin.Service.REPLICAS_KEY;
 
 public final class ServiceUtils {
 
+
+
+    public static class QueryParameters {
+        private final String id;
+        private final int ask;
+        private final int from;
+        private final boolean hasReplicasParameters;
+
+        public QueryParameters(HttpExchange exchange) throws UnsupportedEncodingException {
+            Map<String, String> query = parseQuery(exchange);
+            id = query.get(ID_KEY);
+            String replicas = query.get(REPLICAS_KEY);
+            hasReplicasParameters = (replicas != null) && replicas.matches("\\d+/\\d+");
+            if (hasReplicasParameters) {
+                String[] parts = replicas.split("/");
+                ask = Integer.valueOf(parts[0]);
+                from = Integer.valueOf(parts[1]);
+            } else {
+                ask = 0;
+                from = 0;
+            }
+        }
+
+        public String getId() {
+            return id;
+        }
+
+        public int getAsk() {
+            return ask;
+        }
+
+        public int getFrom() {
+            return from;
+        }
+
+        public boolean hasReplicasParameters() {
+            return hasReplicasParameters;
+        }
+    }
+
     public static class ResponsePair {
+
+        private final int code;
+        private final byte [] data;
 
         public ResponsePair(int code, @Nullable byte[] data) {
             this.code = code;
             this.data = data;
         }
 
-        int code;
-        byte [] data;
+        public int getCode() {
+            return code;
+        }
+
+        public byte[] getData() {
+            return data;
+        }
     }
 
     public static void sendResponse(@NotNull HttpExchange exchange, int code, @Nullable byte[] data) throws IOException {
@@ -34,12 +86,6 @@ public final class ServiceUtils {
         else {
             exchange.sendResponseHeaders(code, 0);
         }
-    }
-
-    @NotNull
-    public static ResponsePair sendRequest(@NotNull String urlString, @NotNull String params,
-                            @NotNull String method, boolean doInput) throws IOException {
-        return sendRequest(urlString, params, method, null, doInput);
     }
 
     @NotNull
@@ -80,6 +126,12 @@ public final class ServiceUtils {
         connection.disconnect();
 
         return new ResponsePair(code, responseData);
+    }
+
+    public static Callable<ResponsePair> callableRequest(
+            @NotNull String urlString, @NotNull String params, @NotNull String method,
+            @Nullable byte [] requestData, boolean doInput) {
+        return () -> sendRequest(urlString, params, method, requestData, doInput);
     }
 
     public static byte[] readData(@NotNull InputStream inputStream) throws IOException {

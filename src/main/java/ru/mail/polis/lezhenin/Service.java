@@ -3,14 +3,13 @@ package ru.mail.polis.lezhenin;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 import ru.mail.polis.KVService;
 
 import java.io.*;
 import java.net.*;
 import java.util.*;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
 import static ru.mail.polis.lezhenin.ServiceUtils.*;
 
@@ -20,9 +19,14 @@ public class Service implements KVService {
     private final Executor entityExecutor = Executors.newCachedThreadPool();
     private final Executor innerExecutor = Executors.newSingleThreadExecutor();
 
-    private static final String ID_KEY = "id";
-    private static final String REPLICAS_KEY = "replicas";
-    private static final String SEND_DATA_KEY = "sendData";
+    private Executor replicasFutureExecutor;
+
+    private static final String PATH_INTERNAL = "/v0/internal";
+    private static final String PATH_ENTITY = "/v0/entity";
+    private static final String PATH_STATUS = "/v0/status";
+
+    static final String ID_KEY = "id";
+    static final String REPLICAS_KEY = "replicas";
 
     private final static String HTTP_METHOD_PUT = "PUT";
     private final static String HTTP_METHOD_GET = "GET";
@@ -45,15 +49,16 @@ public class Service implements KVService {
     private final HttpServer httpServer;
 
     public Service(int port, @NotNull File data) throws IOException {
-        storage = new FileAccessProvider(data);
-        httpServer = HttpServer.create(new InetSocketAddress(port), -1);
-        createContext();
+        this(port, data, Collections.singletonList("http://localhost:" + port));
     }
 
-    public Service(int port, @NotNull File data, @NotNull Set<String> topology) throws IOException {
-        this(port, data);
-        this.topology = new ArrayList<>(topology);
+    public Service(int port, @NotNull File data, @NotNull Collection<String> topology) throws IOException {
+        this.storage = new FileAccessProvider(data);
+        this.httpServer = HttpServer.create(new InetSocketAddress(port), -1);
+        this.topology = topology.stream().distinct().collect(Collectors.toList());
         this.quorum = topology.size() / 2 + 1;
+        this.replicasFutureExecutor = Executors.newFixedThreadPool(topology.size());
+        createContext();
     }
 
     @Override
@@ -68,7 +73,7 @@ public class Service implements KVService {
 
     private void createContext() {
 
-        httpServer.createContext("/v0/status",
+        httpServer.createContext(PATH_STATUS,
                 httpExchange -> statusExecutor.execute(() -> {
                     try {
                         sendResponse(httpExchange, HTTP_CODE_OK, null);
@@ -80,7 +85,7 @@ public class Service implements KVService {
                 })
         );
 
-        httpServer.createContext("/v0/entity",
+        httpServer.createContext(PATH_ENTITY,
                 (HttpExchange httpExchange) -> entityExecutor.execute(() -> {
                     try {
                         handleEntityRequest(httpExchange);
@@ -92,7 +97,7 @@ public class Service implements KVService {
                 })
         );
 
-        httpServer.createContext("/v0/inner_interact",
+        httpServer.createContext(PATH_INTERNAL,
                 (HttpExchange httpExchange) -> innerExecutor.execute(() -> {
                     try {
                         handleInnerRequest(httpExchange);
@@ -108,17 +113,9 @@ public class Service implements KVService {
 
     private void handleInnerRequest(@NotNull HttpExchange httpExchange) throws IOException {
 
-        Map<String, String> query = parseQuery(httpExchange);
+        QueryParameters parameters = new QueryParameters(httpExchange);
 
-        String id = query.get(ID_KEY);
-        int idCode = checkId(id);
-        if (idCode != HTTP_CODE_OK) {
-            sendResponse(httpExchange, idCode, ("BAD ID").getBytes());
-            return;
-        }
-
-        String sendDataKeyStr = query.get(SEND_DATA_KEY);
-        boolean sendData = sendDataKeyStr != null && sendDataKeyStr.matches("(?i)true");
+        String id = parameters.getId();
 
         byte[] byteData = null;
         int resultCode;
@@ -140,9 +137,7 @@ public class Service implements KVService {
                     if (storage.isDeleted(id)) {
                         resultCode = HTTP_CODE_GONE;
                     } else if (storage.isExist(id)) {
-                        if (sendData) {
-                            byteData = storage.getData(id);
-                        }
+                        byteData = storage.getData(id);
                         resultCode = HTTP_CODE_OK;
                     } else {
                         resultCode = HTTP_CODE_NOT_FOUND;
@@ -168,23 +163,25 @@ public class Service implements KVService {
 
     private void handleEntityRequest(@NotNull HttpExchange httpExchange) throws IOException {
 
-        Map<String, String> query = parseQuery(httpExchange);
+        QueryParameters parameters = new QueryParameters(httpExchange);
 
-        String id = query.get(ID_KEY);
-        int idCode = checkId(id);
-        if (idCode != HTTP_CODE_OK) {
-            sendResponse(httpExchange, idCode, null);
+        String id = parameters.getId();
+
+        if (id == null) {
+            sendResponse(httpExchange, HTTP_CODE_NOT_FOUND, null);
+            return;
+        } else if (id.isEmpty()) {
+            sendResponse(httpExchange, HTTP_CODE_BAD_REQUEST, null);
             return;
         }
 
-        String replicas = query.get(REPLICAS_KEY);
-        int ask = quorum;
-        int from = topology.size();
-
-        if ((replicas != null) && replicas.matches("\\d+/\\d+")) {
-            String[] parts = replicas.split("/");
-            ask = Integer.valueOf(parts[0]);
-            from = Integer.valueOf(parts[1]);
+        int ask, from;
+        if (parameters.hasReplicasParameters()) {
+            ask = parameters.getAsk();
+            from = parameters.getFrom();
+        } else {
+            ask = quorum;
+            from = topology.size();
         }
 
         if (ask <= 0 || ask > from) {
@@ -192,68 +189,73 @@ public class Service implements KVService {
             return;
         }
 
-        int answers = 0;
         int hash = id.hashCode();
 
         String url;
-        String parameters = "?" + ID_KEY + "=" + id;
+        String paramStr = "?" + ID_KEY + "=" + id;
 
+        List<FutureTask<ResponsePair>> futureTasks = new ArrayList<>(from);
         List<Integer> responseCodes = new ArrayList<>(from);
-
-        int actualCode;
-        byte[] putData = null;
-        byte[] getData = null;
 
         String method = httpExchange.getRequestMethod();
 
-        try {
+        byte[] putData = method.equals(HTTP_METHOD_PUT) ? readData(httpExchange.getRequestBody()) : null;
+        byte[] getData = null;
 
-            for (int i = 0; i < from && answers < ask; i++) {
+        for (int i = 0; i < from; i++) {
 
-                url = topology.get((Math.abs(hash) + i) % from) + "/v0/inner_interact";
+            url = topology.get((Math.abs(hash) + i) % from) + PATH_INTERNAL;
+            FutureTask<ResponsePair> task = null;
 
-                switch (method) {
+            switch (method) {
 
-                    case HTTP_METHOD_PUT:
-                        if (putData == null) {
-                            putData = readData(httpExchange.getRequestBody());
-                        }
-                        actualCode = sendRequest(url, parameters, method, putData, false).code;
-                        responseCodes.add(actualCode);
-                        break;
+                case HTTP_METHOD_PUT:
+                    task = new FutureTask<>(callableRequest(
+                            url, paramStr, method, putData, false));
+                    break;
 
-                    case HTTP_METHOD_GET:
-                        if (getData == null) {
-                            ResponsePair pair = sendRequest(url, parameters + "&" + SEND_DATA_KEY + "=true",
-                                                            method, true);
-                            actualCode = pair.code;
-                            if (actualCode == HTTP_CODE_OK) {
-                                getData = pair.data;
-                            }
-                        } else {
-                            actualCode = sendRequest(url, parameters, method, false).code;
-                        }
-                        responseCodes.add(actualCode);
-                        break;
+                case HTTP_METHOD_GET:
+                    task = new FutureTask<>(callableRequest(
+                            url, paramStr, method, null, true));
+                    break;
 
-                    case HTTP_METHOD_DELETE:
-                        actualCode = sendRequest(url, parameters, method, false).code;
-                        responseCodes.add(actualCode);
-                        break;
+                case HTTP_METHOD_DELETE:
+                    task = new FutureTask<>(callableRequest(
+                            url, paramStr, method, null, false));
+                    break;
 
-                    default:
-                        actualCode = HTTP_CODE_METHOD_NOT_ALLOWED;
-                        break;
-                }
-
-                if (actualCode != HTTP_CODE_GATEWAY_TIMEOUT) {
-                    answers++;
-                }
+                default:
+                    responseCodes.add(HTTP_CODE_METHOD_NOT_ALLOWED);
+                    break;
             }
 
-        } catch (IOException e) {
-            sendResponse(httpExchange, HTTP_CODE_INTERNAL_ERROR, null);
-            return;
+            if (task != null) {
+                replicasFutureExecutor.execute(task);
+                futureTasks.add(task);
+            }
+
+        }
+
+        int answers = 0;
+        ResponsePair result;
+
+        for (FutureTask<ResponsePair> task : futureTasks) {
+            try {
+                result = task.<ResponsePair>get();
+                responseCodes.add(result.getCode());
+                if (result.getCode() != HTTP_CODE_GATEWAY_TIMEOUT) {
+                    answers++;
+                }
+                if (method.equals(HTTP_METHOD_GET) && result.getCode() == HTTP_CODE_OK && getData == null) {
+                    getData = result.getData();
+                }
+            } catch (InterruptedException | ExecutionException e) {
+                responseCodes.add(HTTP_CODE_INTERNAL_ERROR);
+            }
+
+            if (answers >= ask) {
+                break;
+            }
         }
 
         int resultCode = interpretResponses(method, responseCodes, ask, from);
@@ -289,16 +291,6 @@ public class Service implements KVService {
                 }
             default:
                 return HTTP_CODE_METHOD_NOT_ALLOWED;
-        }
-    }
-
-    private int checkId(@Nullable String id) {
-        if (id == null) {
-            return HTTP_CODE_NOT_FOUND;
-        } else if (id.isEmpty()) {
-            return HTTP_CODE_BAD_REQUEST;
-        } else {
-            return HTTP_CODE_OK;
         }
     }
 
