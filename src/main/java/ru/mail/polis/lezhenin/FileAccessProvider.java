@@ -7,19 +7,19 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.HashSet;
-import java.util.NoSuchElementException;
-import java.util.Set;
+import java.util.*;
 
 public class FileAccessProvider implements DataAccessProvider {
 
     private final static String VALID_FILENAME_REGEX = "[.\\-_a-zA-Z0-9]+";
+    private final static String DELETED_ID_FILE_NAME = "/deleted.txt";
 
     private final File storageDir;
     private final Set<String> deletedEntries = new HashSet<>();
 
     public FileAccessProvider(File storageDir) {
         this.storageDir = storageDir;
+        loadState();
     }
 
     private Path constructPath(@NotNull String id) throws IllegalArgumentException {
@@ -33,7 +33,10 @@ public class FileAccessProvider implements DataAccessProvider {
     public void putData(@NotNull String id, byte[] data) throws IOException, IllegalArgumentException {
         Path path = constructPath(id);
         Files.write(path, data);
-        deletedEntries.remove(id);
+        if (deletedEntries.contains(id)) {
+            deletedEntries.remove(id);
+            saveState();
+        }
     }
 
     @Override
@@ -49,11 +52,14 @@ public class FileAccessProvider implements DataAccessProvider {
     public void deleteData(@NotNull String id) throws IOException, IllegalArgumentException {
         Path path = constructPath(id);
         Files.deleteIfExists(path);
-        deletedEntries.add(id);
+        if (!deletedEntries.contains(id)) {
+            deletedEntries.add(id);
+            saveState();
+        }
     }
 
     @Override
-    public boolean isExist(@NotNull String id) throws IOException, IllegalArgumentException {
+    public boolean doesExist(@NotNull String id) throws IOException, IllegalArgumentException {
         Path path = constructPath(id);
         return Files.exists(path);
     }
@@ -61,5 +67,27 @@ public class FileAccessProvider implements DataAccessProvider {
     @Override
     public boolean isDeleted(@NotNull String id) throws IOException, IllegalArgumentException {
         return deletedEntries.contains(id);
+    }
+
+    private void loadState() {
+        try {
+            File deletedEntriesListFile = new File(storageDir.getAbsolutePath() + DELETED_ID_FILE_NAME);
+            BufferedInputStream inputStream = new BufferedInputStream(new FileInputStream(deletedEntriesListFile));
+            int length = inputStream.available();
+            byte [] data = new byte[length];
+            String ids = new String(data, "UTF-8");
+            deletedEntries.addAll(Arrays.asList(ids.split("\\s+")));
+        } catch (IOException ignored) { }
+    }
+
+    private void saveState() {
+        try {
+            File deletedEntriesListFile = new File(storageDir.getAbsolutePath() + DELETED_ID_FILE_NAME);
+            BufferedOutputStream outputStream = new BufferedOutputStream(new FileOutputStream(deletedEntriesListFile));
+            for (String id : deletedEntries)
+                outputStream.write((id + " ").getBytes("UTF-8"));
+            outputStream.flush();
+            outputStream.close();
+        } catch (IOException ignored) { }
     }
 }

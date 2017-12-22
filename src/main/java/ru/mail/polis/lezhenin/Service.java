@@ -136,7 +136,7 @@ public class Service implements KVService {
                 case HTTP_METHOD_GET:
                     if (storage.isDeleted(id)) {
                         resultCode = HTTP_CODE_GONE;
-                    } else if (storage.isExist(id)) {
+                    } else if (storage.doesExist(id)) {
                         byteData = storage.getData(id);
                         resultCode = HTTP_CODE_OK;
                     } else {
@@ -233,7 +233,6 @@ public class Service implements KVService {
                 replicasFutureExecutor.execute(task);
                 futureTasks.add(task);
             }
-
         }
 
         int answers = 0;

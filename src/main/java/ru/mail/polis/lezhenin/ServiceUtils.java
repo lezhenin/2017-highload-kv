@@ -20,6 +20,7 @@ public final class ServiceUtils {
 
 
     public static class QueryParameters {
+
         private final String id;
         private final int ask;
         private final int from;
